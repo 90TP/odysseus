@@ -17,15 +17,32 @@ on a GET would be unsafe (Lax cookies ride top-level GET navigations), so GET
 /pair only renders a form.
 """
 
+import asyncio
 import html
+import json
+import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 from core.middleware import require_admin
 from src.auth_helpers import get_current_user
+from src.aerith_interaction import AerithInteraction
+from src.endpoint_resolver import normalize_base, resolve_endpoint_runtime
+from src.llm_core import llm_call
+from src.settings import get_setting
 
 from companion import pairing as _pairing
+
+logger = logging.getLogger(__name__)
+
+
+class AerithInteractionRequest(BaseModel):
+    message: str
+
+
+_aerith_interactions: dict[str, AerithInteraction] = {}
 
 
 def token_owner(request: Request) -> str | None:
@@ -63,6 +80,80 @@ def require_models_scope(request: Request) -> None:
     scope_set = {str(scope).strip() for scope in scopes if str(scope).strip()}
     if _pairing.COMPANION_SCOPE not in scope_set:
         raise HTTPException(403, "API token requires chat scope")
+
+
+def _resolve_aerith_route(owner: str | None) -> tuple[str, str, dict[str, str]]:
+    """Resolve the owner's configured default LLM route."""
+    endpoint_id = str(get_setting("default_endpoint_id", "") or "").strip()
+    default_model = str(get_setting("default_model", "") or "").strip()
+
+    from core.database import ModelEndpoint, SessionLocal
+
+    db = SessionLocal()
+    try:
+        q = db.query(ModelEndpoint).filter(
+            ModelEndpoint.is_enabled == True,  # noqa: E712
+            (ModelEndpoint.model_type == "llm") | (ModelEndpoint.model_type == None),  # noqa: E711
+        )
+        if owner:
+            q = q.filter((ModelEndpoint.owner == owner) | (ModelEndpoint.owner == None))  # noqa: E711
+
+        endpoint = None
+        if endpoint_id:
+            endpoint = q.filter(ModelEndpoint.id == endpoint_id).first()
+        if endpoint is None:
+            endpoint = q.order_by(ModelEndpoint.created_at.asc()).first()
+        if endpoint is None:
+            raise RuntimeError("No enabled LLM endpoint is configured for Aerith")
+        if not owner_can_see(endpoint.owner, owner):
+            raise RuntimeError("Configured Aerith endpoint is not available to this owner")
+
+        base_url, api_key = resolve_endpoint_runtime(endpoint, owner=owner)
+        model = default_model
+        if not model:
+            try:
+                cached = json.loads(endpoint.cached_models or "[]")
+                hidden = set(json.loads(endpoint.hidden_models or "[]"))
+                model = next(
+                    (str(m) for m in cached if str(m).strip() and str(m) not in hidden),
+                    "",
+                )
+            except Exception:
+                model = ""
+        if not model:
+            raise RuntimeError("No default Aerith model is configured")
+
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return normalize_base(base_url), model, headers
+    finally:
+        db.close()
+
+
+def _get_aerith_interaction(owner: str | None) -> AerithInteraction:
+    """Return the persistent Aerith interaction state for one companion owner."""
+    key = owner or "__shared__"
+    interaction = _aerith_interactions.get(key)
+    if interaction is not None:
+        return interaction
+
+    def _llm(prompt: str) -> str:
+        url, model, headers = _resolve_aerith_route(owner)
+        return llm_call(
+            url,
+            model,
+            [{"role": "user", "content": prompt}],
+            headers=headers,
+            temperature=0.4,
+            max_tokens=512,
+            prompt_type="aerith",
+            session_id=f"aerith-companion-{key}",
+        )
+
+    interaction = AerithInteraction(_llm)
+    _aerith_interactions[key] = interaction
+    return interaction
 
 
 def mint_pairing_token(owner: str, invalidate=None) -> tuple[str, str]:
@@ -103,7 +194,7 @@ def setup_companion_routes() -> APIRouter:
             "name": "odysseus",
             "version": APP_VERSION,
             "owner": token_owner(request),
-            "capabilities": {"chat": True, "streaming": True},
+            "capabilities": {"chat": True, "streaming": True, "aerith_interaction": True},
         }
 
     @router.get("/models")
@@ -158,6 +249,45 @@ def setup_companion_routes() -> APIRouter:
         finally:
             db.close()
         return {"endpoints": out}
+
+    @router.post("/aerith/interact")
+    async def aerith_interact(payload: AerithInteractionRequest, request: Request):
+        """Send a message from the 3D Aerith companion into Odysseus."""
+        owner = token_owner(request)
+        if not owner:
+            raise HTTPException(401, "Aerith interaction requires an authenticated companion")
+        message = payload.message.strip()
+        if not message:
+            raise HTTPException(400, "Message is required")
+
+        interaction = _get_aerith_interaction(owner)
+        try:
+            response = await asyncio.to_thread(interaction.respond, message)
+        except Exception as exc:
+            logger.exception("Aerith interaction failed")
+            raise HTTPException(502, "Aerith interaction failed") from exc
+        return {"response": response}
+
+    @router.get("/aerith/state")
+    async def aerith_state(request: Request):
+        """Return the current interaction state for the paired companion."""
+        owner = token_owner(request)
+        if not owner:
+            raise HTTPException(401, "Aerith interaction requires an authenticated companion")
+        snapshot = _get_aerith_interaction(owner).snapshot()
+        return {
+            "listening": snapshot.listening,
+            "speaking": snapshot.speaking,
+            "acting": snapshot.acting,
+            "last_user_message": snapshot.last_user_message,
+            "last_aerith_response": snapshot.last_aerith_response,
+            "visual": {
+                "description": snapshot.visual.description,
+                "monitor_id": snapshot.visual.monitor_id,
+                "age": snapshot.visual.age,
+                "pending": snapshot.visual.pending,
+            },
+        }
 
     @router.get("/pair")
     def pair_page(request: Request):
