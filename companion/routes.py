@@ -148,7 +148,6 @@ def _get_aerith_interaction(owner: str | None) -> AerithInteraction:
             temperature=0.4,
             max_tokens=512,
             prompt_type="aerith",
-            session_id=f"aerith-companion-{key}",
         )
 
     interaction = AerithInteraction(_llm)
