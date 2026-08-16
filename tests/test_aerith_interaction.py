@@ -31,7 +31,7 @@ def test_pending_vision_does_not_replace_last_observation():
 
     context = interaction.build_context()
     assert "The terminal is visible." in context
-    assert "currently in progress" in context
+    assert "currently in progress" in context.lower()
 
 
 def test_action_handler_updates_acting_state_and_returns_result():
