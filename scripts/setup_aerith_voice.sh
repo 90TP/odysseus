@@ -12,8 +12,10 @@ TTS_RVC_DIR="${TTS_RVC_API_DIR:-$REPO_ROOT/TTS-RVC-API}"
 MODEL_DIR="${RVC_MODEL_DIR:-$TTS_RVC_DIR/models}"
 AERITH_DIR="$MODEL_DIR/aerith"
 
-PTH="$ASSETS_REPO/assets/aerith/voice/aerith_e100_s8800.pth"
-INDEX="$ASSETS_REPO/assets/aerith/voice/added_IVF3778_Flat_nprobe_1_aerith_v2.index"
+# The aerith-assets repository currently stores the LFS objects at its root.
+# Keep these paths here so the large files remain outside the Odysseus repo.
+PTH="$ASSETS_REPO/aerith_e100_s8800.pth"
+INDEX="$ASSETS_REPO/added_IVF3778_Flat_nprobe_1_aerith_v2.index"
 
 if [[ ! -f "$PTH" || ! -f "$INDEX" ]]; then
     echo "Aerith voice assets are missing from: $ASSETS_REPO" >&2
