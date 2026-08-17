@@ -3,11 +3,11 @@
 Aerith voice is intentionally split into two processes:
 
 ```text
-Aerith interaction → Edge TTS → RVC HTTP service → audio
+Aerith interaction → TTS-RVC-API → WAV
 ```
 
-Odysseus owns the text response and voice API. The GPU-heavy RVC runtime stays in
-its own virtualenv/service.
+Odysseus owns the text response and companion voice API. The GPU-heavy Coqui +
+RVC runtime stays in the existing `TTS-RVC-API` virtualenv/service.
 
 ## Model assets
 
@@ -19,6 +19,17 @@ repository using Git LFS:
 
 Do not copy those large files into the Odysseus repository.
 
+The TTS-RVC service dynamically discovers RVC models under its configured
+`RVC_MODEL_DIR`. Put the two files in one speaker directory, for example:
+
+```text
+TTS-RVC-API/models/aerith/
+├── aerith_e100_s8800.pth
+└── added_IVF3778_Flat_nprobe_1_aerith_v2.index
+```
+
+The directory name becomes the `speaker_name`, so `aerith` is the API voice ID.
+
 ## Runtime configuration
 
 Set these environment variables on the Odysseus server:
@@ -26,22 +37,20 @@ Set these environment variables on the Odysseus server:
 ```text
 AERITH_VOICE_ENABLED=1
 AERITH_RVC_URL=http://127.0.0.1:8001
-AERITH_RVC_ENDPOINT=/clone/
+AERITH_RVC_ENDPOINT=/generate/
 AERITH_RVC_SPEAKER=aerith
-AERITH_TTS_VOICE=en-GB-SoniaNeural
-AERITH_TTS_RATE=+0%
-AERITH_TTS_PITCH=+0Hz
-AERITH_SPEECH_TIMEOUT=90
+AERITH_RVC_EMOTION=
+AERITH_RVC_SPEED=1.0
+AERITH_SPEECH_TIMEOUT=120
 ```
 
-The RVC endpoint is configurable because the existing local RVC projects use
-slightly different HTTP contracts. The adapter accepts either a direct audio
-response or JSON containing base64 audio under `base64_wav`, `audio_base64`,
-`wav`, `audio`, or `data`.
+The default endpoint matches the existing `TTS-RVC-API`: it accepts JSON with
+`speaker_name`, `input_text`, optional `emotion`, and `speed`, and returns a WAV
+stream. citeturn33file0turn34file0
 
 ## Companion API
 
-Existing text interaction remains unchanged:
+Existing text interaction remains compatible:
 
 ```text
 POST /api/companion/aerith/interact
@@ -83,27 +92,12 @@ POST /api/companion/aerith/audio
 All three endpoints use the existing companion authentication. The interaction
 state's `speaking` flag is set for the duration of synthesis.
 
-## RVC service contract
-
-The default adapter calls:
-
-```text
-POST http://127.0.0.1:8001/clone/
-Content-Type: multipart/form-data
-
-speaker_name=aerith
-audio_file=<base TTS audio>
-```
-
-If the local RVC service uses another route or field names, change
-`AERITH_RVC_ENDPOINT` and adapt the small `_rvc_convert()` request in
-`src/aerith_speech.py`; the rest of Aerith does not need changing.
-
 ## First-run checklist
 
-1. Install the updated Odysseus requirements so `edge-tts` is available.
-2. Ensure the RVC service is running and can load the Aerith `.pth` and `.index`.
-3. Set the environment variables above.
-4. Verify `/api/companion/info` reports `aerith_voice: true`.
-5. Call `/api/companion/aerith/interact` with `voice:true`.
-6. Play the returned base64 bytes as the advertised media type in the 3D client.
+1. Put the two LFS assets into the `TTS-RVC-API/models/aerith/` speaker directory.
+2. Ensure `RVC_MODEL_DIR` points at the TTS-RVC-API `models` directory.
+3. Start the existing TTS-RVC API on the configured port.
+4. Set the Odysseus environment variables above.
+5. Verify `/api/companion/info` reports `aerith_voice: true`.
+6. Call `/api/companion/aerith/interact` with `voice:true`.
+7. Play the returned base64 bytes as the advertised media type in the 3D client.
