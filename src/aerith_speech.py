@@ -10,6 +10,7 @@ keeps Coqui/RVC dependencies out of the Odysseus application environment.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 
@@ -46,7 +47,7 @@ class AerithSpeech:
         if not self.enabled:
             raise AerithSpeechError("Aerith voice is disabled")
 
-        return await __import__("asyncio").to_thread(self._generate, text)
+        return await asyncio.to_thread(self._generate, text)
 
     def _generate(self, text: str) -> SpeechResult:
         url = f"{self.rvc_url}/{self.rvc_endpoint.lstrip('/')}"
