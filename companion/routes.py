@@ -18,17 +18,19 @@ on a GET would be unsafe (Lax cookies ride top-level GET navigations), so GET
 """
 
 import asyncio
+import base64
 import html
 import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
 from core.middleware import require_admin
 from src.auth_helpers import get_current_user
 from src.aerith_interaction import AerithInteraction
+from src.aerith_speech import AerithSpeech, AerithSpeechError
 from src.endpoint_resolver import normalize_base, resolve_endpoint_runtime
 from src.llm_core import llm_call
 from src.settings import get_setting
@@ -40,9 +42,15 @@ logger = logging.getLogger(__name__)
 
 class AerithInteractionRequest(BaseModel):
     message: str
+    voice: bool = False
+
+
+class AerithSpeakRequest(BaseModel):
+    text: str
 
 
 _aerith_interactions: dict[str, AerithInteraction] = {}
+_aerith_speech = AerithSpeech()
 
 
 def token_owner(request: Request) -> str | None:
@@ -169,6 +177,16 @@ def mint_pairing_token(owner: str, invalidate=None) -> tuple[str, str]:
     return token_id, raw_token
 
 
+async def _synth_aerith_voice(interaction: AerithInteraction, text: str) -> tuple[str, str]:
+    """Generate voice while keeping Aerith's speaking state accurate."""
+    interaction.set_speaking(True)
+    try:
+        result = await _aerith_speech.synthesize(text)
+        return base64.b64encode(result.audio).decode("ascii"), result.media_type
+    finally:
+        interaction.set_speaking(False)
+
+
 def setup_companion_routes() -> APIRouter:
     router = APIRouter(prefix="/api/companion", tags=["companion"])
 
@@ -193,7 +211,12 @@ def setup_companion_routes() -> APIRouter:
             "name": "odysseus",
             "version": APP_VERSION,
             "owner": token_owner(request),
-            "capabilities": {"chat": True, "streaming": True, "aerith_interaction": True},
+            "capabilities": {
+                "chat": True,
+                "streaming": True,
+                "aerith_interaction": True,
+                "aerith_voice": _aerith_speech.enabled,
+            },
         }
 
     @router.get("/models")
@@ -251,7 +274,13 @@ def setup_companion_routes() -> APIRouter:
 
     @router.post("/aerith/interact")
     async def aerith_interact(payload: AerithInteractionRequest, request: Request):
-        """Send a message from the 3D Aerith companion into Odysseus."""
+        """Send a message from the 3D Aerith companion into Odysseus.
+
+        Set ``voice=true`` for a complete voice-chat response.  The audio is
+        returned as base64 so a browser/3D client can play it with a Blob or
+        data URL while still sending its normal Authorization header to this
+        endpoint.
+        """
         owner = token_owner(request)
         if not owner:
             raise HTTPException(401, "Aerith interaction requires an authenticated companion")
@@ -265,7 +294,65 @@ def setup_companion_routes() -> APIRouter:
         except Exception as exc:
             logger.exception("Aerith interaction failed")
             raise HTTPException(502, "Aerith interaction failed") from exc
-        return {"response": response}
+
+        result = {"response": response}
+        if payload.voice:
+            if not _aerith_speech.enabled:
+                raise HTTPException(503, "Aerith voice is not enabled")
+            try:
+                audio, media_type = await _synth_aerith_voice(interaction, response)
+            except AerithSpeechError as exc:
+                logger.exception("Aerith speech synthesis failed")
+                raise HTTPException(502, f"Aerith speech synthesis failed: {exc}") from exc
+            result.update({"audio_base64": audio, "audio_media_type": media_type, "voice": True})
+        else:
+            result["voice"] = False
+        return result
+
+    @router.post("/aerith/speak")
+    async def aerith_speak(payload: AerithSpeakRequest, request: Request):
+        """Synthesise arbitrary already-generated Aerith text into her voice."""
+        owner = token_owner(request)
+        if not owner:
+            raise HTTPException(401, "Aerith speech requires an authenticated companion")
+        text = payload.text.strip()
+        if not text:
+            raise HTTPException(400, "Text is required")
+        if not _aerith_speech.enabled:
+            raise HTTPException(503, "Aerith voice is not enabled")
+        interaction = _get_aerith_interaction(owner)
+        try:
+            audio, media_type = await _synth_aerith_voice(interaction, text)
+        except AerithSpeechError as exc:
+            logger.exception("Aerith speech synthesis failed")
+            raise HTTPException(502, f"Aerith speech synthesis failed: {exc}") from exc
+        return {"audio_base64": audio, "audio_media_type": media_type, "voice": True}
+
+    @router.post("/aerith/audio")
+    async def aerith_audio(payload: AerithSpeakRequest, request: Request):
+        """Return generated speech directly as an audio response.
+
+        This is useful for clients which already have an authenticated HTTP
+        wrapper and want a native WAV/MP3 response instead of base64 JSON.
+        """
+        owner = token_owner(request)
+        if not owner:
+            raise HTTPException(401, "Aerith speech requires an authenticated companion")
+        text = payload.text.strip()
+        if not text:
+            raise HTTPException(400, "Text is required")
+        if not _aerith_speech.enabled:
+            raise HTTPException(503, "Aerith voice is not enabled")
+        interaction = _get_aerith_interaction(owner)
+        interaction.set_speaking(True)
+        try:
+            result = await _aerith_speech.synthesize(text)
+        except AerithSpeechError as exc:
+            logger.exception("Aerith speech synthesis failed")
+            raise HTTPException(502, f"Aerith speech synthesis failed: {exc}") from exc
+        finally:
+            interaction.set_speaking(False)
+        return Response(content=result.audio, media_type=result.media_type)
 
     @router.get("/aerith/state")
     async def aerith_state(request: Request):
