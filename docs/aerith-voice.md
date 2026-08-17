@@ -30,6 +30,9 @@ TTS-RVC-API/models/aerith/
 
 The directory name becomes the `speaker_name`, so `aerith` is the API voice ID.
 
+`scripts/setup_aerith_voice.sh` creates these links automatically from the
+separate LFS checkout.
+
 ## Runtime configuration
 
 Set these environment variables on the Odysseus server:
@@ -46,7 +49,7 @@ AERITH_SPEECH_TIMEOUT=120
 
 The default endpoint matches the existing `TTS-RVC-API`: it accepts JSON with
 `speaker_name`, `input_text`, optional `emotion`, and `speed`, and returns a WAV
-stream. citeturn33file0turn34file0
+stream.
 
 ## Companion API
 
@@ -94,10 +97,12 @@ state's `speaking` flag is set for the duration of synthesis.
 
 ## First-run checklist
 
-1. Put the two LFS assets into the `TTS-RVC-API/models/aerith/` speaker directory.
-2. Ensure `RVC_MODEL_DIR` points at the TTS-RVC-API `models` directory.
-3. Start the existing TTS-RVC API on the configured port.
-4. Set the Odysseus environment variables above.
-5. Verify `/api/companion/info` reports `aerith_voice: true`.
-6. Call `/api/companion/aerith/interact` with `voice:true`.
-7. Play the returned base64 bytes as the advertised media type in the 3D client.
+1. Run `git lfs pull` in the `aerith-assets` checkout.
+2. Run `scripts/setup_aerith_voice.sh` from Odysseus (or set its environment
+   variables if the checkouts are elsewhere).
+3. Ensure `RVC_MODEL_DIR` points at the TTS-RVC-API `models` directory.
+4. Start the existing TTS-RVC API on port 8001.
+5. Set the Odysseus environment variables above.
+6. Verify `/api/companion/info` reports `aerith_voice: true`.
+7. Call `/api/companion/aerith/interact` with `voice:true`.
+8. Play the returned base64 bytes as the advertised media type in the 3D client.
