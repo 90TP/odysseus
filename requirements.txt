@@ -47,9 +47,6 @@ qrcode[pil]
 croniter
 pytest
 pytest-asyncio
-# Speech synthesis for Aerith's voice pipeline. RVC remains a separate GPU
-# service so the core application does not carry the RVC runtime dependency.
-edge-tts
 # starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
