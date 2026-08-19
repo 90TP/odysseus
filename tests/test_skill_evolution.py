@@ -52,8 +52,9 @@ def test_compose_rejects_cycles_and_missing_parents(tmp_path):
         ev.compose("bad", ["one"], owner="tom")
 
     ev.compose("combined", ["one", "two"], owner="tom")
+    ev._set_record("one", "tom", {"parents": ["combined"], "kind": "composition"})
     with __import__("pytest").raises(SkillEvolutionError):
-        ev.compose("one", ["combined", "two"], owner="tom")
+        ev.compose("new-capability", ["one", "two"], owner="tom")
 
 
 def test_extend_bumps_patch_version_and_preserves_lineage(tmp_path):
