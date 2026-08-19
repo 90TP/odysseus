@@ -21,6 +21,53 @@ from src.tools.system import (  # noqa: F401
 )
 
 
+def _extend_manage_skills_schema() -> None:
+    """Teach native function-calling about the evolution actions.
+
+    The schema is defined in a large central registry, while the implementation
+    is intentionally wrapped here. Mutating the already-loaded schema avoids a
+    second copy of the registry and keeps the compatibility facade as the
+    single integration point for this feature.
+    """
+    try:
+        from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+        for entry in FUNCTION_TOOL_SCHEMAS:
+            fn = entry.get("function", {})
+            if fn.get("name") != "manage_skills":
+                continue
+            params = fn.setdefault("parameters", {})
+            props = params.setdefault("properties", {})
+            action = props.get("action", {})
+            enum = list(action.get("enum") or [])
+            for value in ("compose", "extend", "lineage", "retire", "promote"):
+                if value not in enum:
+                    enum.append(value)
+            action["enum"] = enum
+            action["description"] = (
+                "CRUD: list/view/view_ref/add/edit/patch/publish/delete/search. "
+                "Evolution: compose combines existing skills; extend adds capability "
+                "to an existing skill; lineage shows ancestry; retire hides a skill "
+                "without deleting its history; promote publishes a verified evolved skill."
+            )
+            props.update({
+                "parents": {"type": "array", "items": {"type": "string"}, "description": "Parent skill names for compose (minimum two)."},
+                "procedure_append": {"type": "array", "items": {"type": "string"}, "description": "Steps to append when extending a skill."},
+                "procedure_prepend": {"type": "array", "items": {"type": "string"}, "description": "Steps to prepend when extending a skill."},
+                "pitfalls_append": {"type": "array", "items": {"type": "string"}, "description": "Additional pitfalls for extend."},
+                "verification_append": {"type": "array", "items": {"type": "string"}, "description": "Additional verification steps for extend."},
+                "tags_add": {"type": "array", "items": {"type": "string"}, "description": "Tags to add when extending."},
+                "recursive": {"type": "boolean", "description": "For lineage, include the complete ancestry tree (default true)."},
+                "reason": {"type": "string", "description": "Reason for retiring a skill."},
+                "skills": {"type": "array", "items": {"type": "string"}, "description": "Alias for parents when composing."},
+            })
+            return
+    except Exception:
+        logging.getLogger(__name__).debug("Could not extend manage_skills native schema", exc_info=True)
+
+
+_extend_manage_skills_schema()
+
+
 async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     """Extend the native skill registry with composition/evolution actions.
 
