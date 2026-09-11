@@ -17,8 +17,14 @@ import retrofit2.http.Query
 interface TandoorApi {
     @GET("api/recipe/")
     suspend fun recipes(
+        @Query("page") page: Int = 1,
         @Query("page_size") pageSize: Int = 100,
-        @Query("query") query: String? = null
+        @Query("query") query: String = "",
+        @Query("internal") internal: Boolean = false,
+        @Query("random") random: Boolean = false,
+        @Query("new") newRecipes: Boolean = true,
+        @Query("include_children") includeChildren: Boolean = true,
+        @Query("num_recent") numRecent: Int = 5
     ): RecipePage
 
     @GET("api/recipe/{id}/")
@@ -55,14 +61,15 @@ class ApiFactory(private val settings: AppSettings) {
         val auth = Interceptor { chain ->
             val token = settings.authToken
             val original = chain.request()
-            val request: Request = if (token.isBlank()) {
-                original
-            } else {
-                original.newBuilder()
-                    .header("Authorization", "Token $token")
-                    .build()
+            val builder = original.newBuilder()
+                .header("Host", "192.168.0.153:8321")
+                .header("Accept", "application/json")
+
+            if (token.isNotBlank()) {
+                builder.header("Authorization", "Token $token")
             }
-            chain.proceed(request)
+
+            chain.proceed(builder.build())
         }
 
         val client = OkHttpClient.Builder()
