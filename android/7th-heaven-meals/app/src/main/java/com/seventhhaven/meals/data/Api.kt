@@ -51,7 +51,7 @@ class AppSettings(context: Context) {
 
     var authToken: String
         get() = prefs.getString(KEY_TOKEN, "") ?: ""
-        set(value) = prefs.edit().putString(KEY_TOKEN, value.trim()).apply()
+        set(value) = prefs.edit().putString(KEY_TOKEN, cleanToken(value)).apply()
 
     private fun normalize(value: String): String {
         val trimmed = value.trim()
@@ -74,17 +74,26 @@ class AppSettings(context: Context) {
         const val DEFAULT_BASE_URL = "https://highwind.tailfc86b0.ts.net:8321/"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_TOKEN = "auth_token"
+
+        fun cleanToken(value: String): String {
+            var token = value.trim()
+            if (token.startsWith("Bearer ", ignoreCase = true)) token = token.substring(7).trim()
+            if (token.startsWith("Token ", ignoreCase = true)) token = token.substring(6).trim()
+            return token
+        }
     }
 }
 
 class ApiFactory(private val settings: AppSettings) {
+    private fun currentToken(): String = AppSettings.cleanToken(settings.authToken)
+
     private fun createClient(): OkHttpClient {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         }
 
         val auth = Interceptor { chain ->
-            val token = settings.authToken.trim()
+            val token = currentToken()
             val builder = chain.request().newBuilder()
                 .header("Accept", "application/json")
 
@@ -116,35 +125,51 @@ class ApiFactory(private val settings: AppSettings) {
     }
 
     fun testConnection(): ConnectionTestResult {
+        val token = currentToken()
         val url = settings.baseUrl.trimEnd('/') + "/api/recipe/?page=1&page_size=1"
-        val request = Request.Builder()
+        val requestBuilder = Request.Builder()
             .url(url)
+            .header("Accept", "application/json")
             .get()
-            .build()
+
+        // Attach auth explicitly for the diagnostic request so there is no ambiguity
+        // about whether an interceptor or preference refresh omitted it.
+        if (token.isNotBlank()) {
+            requestBuilder.header("Authorization", "Bearer $token")
+        }
+
+        val request = requestBuilder.build()
+        val authAttached = request.header("Authorization") != null
+        val prefix = "URL=$url | tokenChars=${token.length} | authHeader=$authAttached"
 
         return try {
-            createClient().newCall(request).execute().use { response ->
-                val body = response.body?.string().orEmpty()
-                val detail = body.take(500).ifBlank { response.message }
-                if (response.isSuccessful) {
-                    ConnectionTestResult(
-                        ok = true,
-                        statusCode = response.code,
-                        message = "HTTP ${response.code} — connection and Bearer authentication succeeded."
-                    )
-                } else {
-                    ConnectionTestResult(
-                        ok = false,
-                        statusCode = response.code,
-                        message = "HTTP ${response.code}: $detail"
-                    )
+            OkHttpClient.Builder()
+                .addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
+                .build()
+                .newCall(request)
+                .execute()
+                .use { response ->
+                    val body = response.body?.string().orEmpty()
+                    val detail = body.take(500).ifBlank { response.message }
+                    if (response.isSuccessful) {
+                        ConnectionTestResult(
+                            ok = true,
+                            statusCode = response.code,
+                            message = "$prefix\nHTTP ${response.code} — connection and Bearer authentication succeeded."
+                        )
+                    } else {
+                        ConnectionTestResult(
+                            ok = false,
+                            statusCode = response.code,
+                            message = "$prefix\nHTTP ${response.code}: $detail"
+                        )
+                    }
                 }
-            }
         } catch (t: Throwable) {
             ConnectionTestResult(
                 ok = false,
                 statusCode = null,
-                message = "${t::class.java.simpleName}: ${t.message ?: "Unknown connection error"}"
+                message = "$prefix\n${t::class.java.simpleName}: ${t.message ?: "Unknown connection error"}"
             )
         }
     }
