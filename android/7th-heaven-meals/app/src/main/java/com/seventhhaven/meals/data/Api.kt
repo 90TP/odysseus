@@ -40,7 +40,6 @@ class AppSettings(context: Context) {
         set(value) = prefs.edit().putString(KEY_TOKEN, value.trim()).apply()
 
     companion object {
-        // Change this in Settings on first launch if Highwind uses a different LAN/Tailscale URL.
         const val DEFAULT_BASE_URL = "http://192.168.0.153:8321/"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_TOKEN = "auth_token"
@@ -72,6 +71,7 @@ class ApiFactory(private val settings: AppSettings) {
             .build()
 
         val moshi = Moshi.Builder()
+            .add(RecipeListAdapter())
             .add(KotlinJsonAdapterFactory())
             .build()
 
