@@ -36,6 +36,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -54,6 +56,7 @@ import com.seventhhaven.meals.data.RecipeOverview
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import retrofit2.HttpException
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -147,10 +150,13 @@ class RecipeViewModel : ViewModel() {
         error = null
         try {
             recipes = withContext(Dispatchers.IO) {
-                factory.create().recipes(query = query.orEmpty()).results
+                factory.create().recipes(query = query?.takeIf { it.isNotBlank() }).results
             }
+        } catch (e: HttpException) {
+            val body = e.response()?.errorBody()?.string().orEmpty().take(500)
+            error = "HTTP ${e.code()}: ${body.ifBlank { e.message() }}"
         } catch (t: Throwable) {
-            error = t.message ?: t::class.java.simpleName
+            error = "${t::class.java.simpleName}: ${t.message ?: "Unknown error"}"
         } finally {
             loading = false
         }
@@ -163,7 +169,8 @@ fun RecipesScreen(onOpenRecipe: (Int) -> Unit, vm: RecipeViewModel = viewModel()
     val context = androidx.compose.ui.platform.LocalContext.current
     val settings = AppSettings(context)
     val factory = ApiFactory(settings)
-    var query by mutableStateOf("")
+    val scope = rememberCoroutineScope()
+    var query by rememberSaveable { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         vm.load(factory)
@@ -186,7 +193,7 @@ fun RecipesScreen(onOpenRecipe: (Int) -> Unit, vm: RecipeViewModel = viewModel()
                     label = { Text("Search recipes") }
                 )
                 Button(onClick = {
-                    kotlinx.coroutines.MainScope().launch { vm.load(factory, query) }
+                    scope.launch { vm.load(factory, query) }
                 }) {
                     Text("Search")
                 }
@@ -255,8 +262,12 @@ fun PlaceholderScreen(title: String) {
 fun SettingsScreen() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val settings = AppSettings(context)
-    var baseUrl by mutableStateOf(settings.baseUrl)
-    var token by mutableStateOf(settings.authToken)
+    val scope = rememberCoroutineScope()
+
+    var baseUrl by rememberSaveable { mutableStateOf(settings.baseUrl) }
+    var token by rememberSaveable { mutableStateOf(settings.authToken) }
+    var status by rememberSaveable { mutableStateOf<String?>(null) }
+    var testing by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -269,19 +280,51 @@ fun SettingsScreen() {
             value = baseUrl,
             onValueChange = { baseUrl = it },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Backend URL") }
+            label = { Text("Backend URL") },
+            supportingText = { Text("Use https://highwind.tailfc86b0.ts.net:8321/") }
         )
         OutlinedTextField(
             value = token,
             onValueChange = { token = it },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Tandoor API token") }
+            label = { Text("Tandoor API token") },
+            supportingText = {
+                Text(if (token.isBlank()) "No token saved" else "Token entered (${token.length} characters)")
+            }
         )
-        Button(onClick = {
-            settings.baseUrl = baseUrl
-            settings.authToken = token
-        }) {
-            Text("Save")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = {
+                settings.baseUrl = baseUrl
+                settings.authToken = token
+                baseUrl = settings.baseUrl
+                token = settings.authToken
+                status = "Saved."
+            }) {
+                Text("Save")
+            }
+
+            Button(
+                enabled = !testing,
+                onClick = {
+                    settings.baseUrl = baseUrl
+                    settings.authToken = token
+                    baseUrl = settings.baseUrl
+                    token = settings.authToken
+                    testing = true
+                    status = "Testing ${settings.baseUrl} ..."
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            ApiFactory(settings).testConnection()
+                        }
+                        status = result.message
+                        testing = false
+                    }
+                }
+            ) {
+                Text(if (testing) "Testing..." else "Test connection")
+            }
         }
+
+        status?.let { Text(it) }
     }
 }
