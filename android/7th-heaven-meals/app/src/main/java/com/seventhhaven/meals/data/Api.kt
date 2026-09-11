@@ -6,7 +6,6 @@ import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import okhttp3.Request
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
@@ -46,7 +45,7 @@ class AppSettings(context: Context) {
         set(value) = prefs.edit().putString(KEY_TOKEN, value.trim()).apply()
 
     companion object {
-        const val DEFAULT_BASE_URL = "http://100.115.160.72:8321/"
+        const val DEFAULT_BASE_URL = "https://highwind.tailfc86b0.ts.net:8321/"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_TOKEN = "auth_token"
     }
@@ -60,13 +59,11 @@ class ApiFactory(private val settings: AppSettings) {
 
         val auth = Interceptor { chain ->
             val token = settings.authToken
-            val original = chain.request()
-            val builder = original.newBuilder()
-                .header("Host", "192.168.0.153:8321")
+            val builder = chain.request().newBuilder()
                 .header("Accept", "application/json")
 
             if (token.isNotBlank()) {
-                builder.header("Authorization", "Token $token")
+                builder.header("Authorization", "Bearer $token")
             }
 
             chain.proceed(builder.build())
