@@ -52,6 +52,7 @@ import com.seventhhaven.meals.data.ApiFactory
 import com.seventhhaven.meals.data.AppSettings
 import com.seventhhaven.meals.data.RecipeOverview
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
