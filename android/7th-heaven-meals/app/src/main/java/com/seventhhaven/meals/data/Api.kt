@@ -18,12 +18,7 @@ interface TandoorApi {
     suspend fun recipes(
         @Query("page") page: Int = 1,
         @Query("page_size") pageSize: Int = 100,
-        @Query("query") query: String = "",
-        @Query("internal") internal: Boolean = false,
-        @Query("random") random: Boolean = false,
-        @Query("new") newRecipes: Boolean = true,
-        @Query("include_children") includeChildren: Boolean = true,
-        @Query("num_recent") numRecent: Int = 5
+        @Query("query") query: String? = null
     ): RecipePage
 
     @GET("api/recipe/{id}/")
@@ -34,15 +29,32 @@ class AppSettings(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("7th_heaven_settings", Context.MODE_PRIVATE)
 
     var baseUrl: String
-        get() = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
+        get() {
+            val stored = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
+            val migrated = migrateLegacyBaseUrl(stored)
+            if (migrated != stored) {
+                prefs.edit().putString(KEY_BASE_URL, migrated).apply()
+            }
+            return migrated
+        }
         set(value) {
             val normalized = value.trim().let { if (it.endsWith('/')) it else "$it/" }
-            prefs.edit().putString(KEY_BASE_URL, normalized).apply()
+            prefs.edit().putString(KEY_BASE_URL, migrateLegacyBaseUrl(normalized)).apply()
         }
 
     var authToken: String
         get() = prefs.getString(KEY_TOKEN, "") ?: ""
         set(value) = prefs.edit().putString(KEY_TOKEN, value.trim()).apply()
+
+    private fun migrateLegacyBaseUrl(value: String): String {
+        val normalized = value.trim().let { if (it.endsWith('/')) it else "$it/" }
+        return when (normalized) {
+            "http://192.168.0.153:8321/",
+            "http://100.115.160.72:8321/",
+            "http://highwind.tailfc86b0.ts.net:8321/" -> DEFAULT_BASE_URL
+            else -> normalized
+        }
+    }
 
     companion object {
         const val DEFAULT_BASE_URL = "https://highwind.tailfc86b0.ts.net:8321/"
