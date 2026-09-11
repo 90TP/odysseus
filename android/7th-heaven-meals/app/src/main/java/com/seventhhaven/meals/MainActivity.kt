@@ -19,7 +19,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        webView = WebView(this).apply {
+        webView = WebView(this).apply web@ {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
 
             CookieManager.getInstance().apply {
                 setAcceptCookie(true)
-                setAcceptThirdPartyCookies(this@apply, true)
+                setAcceptThirdPartyCookies(this@web, true)
             }
 
             webViewClient = object : WebViewClient() {
