@@ -40,7 +40,7 @@ class AppSettings(context: Context) {
         set(value) = prefs.edit().putString(KEY_TOKEN, value.trim()).apply()
 
     companion object {
-        const val DEFAULT_BASE_URL = "http://192.168.0.153:8321/"
+        const val DEFAULT_BASE_URL = "http://100.115.160.72:8321/"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_TOKEN = "auth_token"
     }
@@ -59,7 +59,7 @@ class ApiFactory(private val settings: AppSettings) {
                 original
             } else {
                 original.newBuilder()
-                    .header("Authorization", "Bearer $token")
+                    .header("Authorization", "Token $token")
                     .build()
             }
             chain.proceed(request)
