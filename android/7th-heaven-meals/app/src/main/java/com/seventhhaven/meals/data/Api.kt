@@ -6,6 +6,7 @@ import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
@@ -25,6 +26,12 @@ interface TandoorApi {
     suspend fun recipe(@Path("id") id: Int): RecipeDetail
 }
 
+data class ConnectionTestResult(
+    val ok: Boolean,
+    val statusCode: Int?,
+    val message: String
+)
+
 class AppSettings(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("7th_heaven_settings", Context.MODE_PRIVATE)
 
@@ -38,7 +45,7 @@ class AppSettings(context: Context) {
             return migrated
         }
         set(value) {
-            val normalized = value.trim().let { if (it.endsWith('/')) it else "$it/" }
+            val normalized = normalize(value)
             prefs.edit().putString(KEY_BASE_URL, migrateLegacyBaseUrl(normalized)).apply()
         }
 
@@ -46,11 +53,18 @@ class AppSettings(context: Context) {
         get() = prefs.getString(KEY_TOKEN, "") ?: ""
         set(value) = prefs.edit().putString(KEY_TOKEN, value.trim()).apply()
 
+    private fun normalize(value: String): String {
+        val trimmed = value.trim()
+        return if (trimmed.endsWith('/')) trimmed else "$trimmed/"
+    }
+
     private fun migrateLegacyBaseUrl(value: String): String {
-        val normalized = value.trim().let { if (it.endsWith('/')) it else "$it/" }
+        val normalized = normalize(value)
         return when (normalized) {
             "http://192.168.0.153:8321/",
+            "https://192.168.0.153:8321/",
             "http://100.115.160.72:8321/",
+            "https://100.115.160.72:8321/",
             "http://highwind.tailfc86b0.ts.net:8321/" -> DEFAULT_BASE_URL
             else -> normalized
         }
@@ -64,13 +78,13 @@ class AppSettings(context: Context) {
 }
 
 class ApiFactory(private val settings: AppSettings) {
-    fun create(): TandoorApi {
+    private fun createClient(): OkHttpClient {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BASIC
         }
 
         val auth = Interceptor { chain ->
-            val token = settings.authToken
+            val token = settings.authToken.trim()
             val builder = chain.request().newBuilder()
                 .header("Accept", "application/json")
 
@@ -81,11 +95,13 @@ class ApiFactory(private val settings: AppSettings) {
             chain.proceed(builder.build())
         }
 
-        val client = OkHttpClient.Builder()
+        return OkHttpClient.Builder()
             .addInterceptor(auth)
             .addInterceptor(logging)
             .build()
+    }
 
+    fun create(): TandoorApi {
         val moshi = Moshi.Builder()
             .add(RecipeListAdapter())
             .add(KotlinJsonAdapterFactory())
@@ -93,10 +109,44 @@ class ApiFactory(private val settings: AppSettings) {
 
         return Retrofit.Builder()
             .baseUrl(settings.baseUrl)
-            .client(client)
+            .client(createClient())
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(TandoorApi::class.java)
+    }
+
+    fun testConnection(): ConnectionTestResult {
+        val url = settings.baseUrl.trimEnd('/') + "/api/recipe/?page=1&page_size=1"
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+
+        return try {
+            createClient().newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                val detail = body.take(500).ifBlank { response.message }
+                if (response.isSuccessful) {
+                    ConnectionTestResult(
+                        ok = true,
+                        statusCode = response.code,
+                        message = "HTTP ${response.code} — connection and Bearer authentication succeeded."
+                    )
+                } else {
+                    ConnectionTestResult(
+                        ok = false,
+                        statusCode = response.code,
+                        message = "HTTP ${response.code}: $detail"
+                    )
+                }
+            }
+        } catch (t: Throwable) {
+            ConnectionTestResult(
+                ok = false,
+                statusCode = null,
+                message = "${t::class.java.simpleName}: ${t.message ?: "Unknown connection error"}"
+            )
+        }
     }
 
     fun absoluteMediaUrl(path: String?): String? {
