@@ -884,6 +884,9 @@ app.include_router(setup_contacts_routes())
 
 from companion import setup_companion_routes
 app.include_router(setup_companion_routes())
+from companion.maintenance.routes import setup_maintenance_routes
+from companion.maintenance.runtime import get_maintainer as _get_aerith_maintainer
+app.include_router(setup_maintenance_routes(_get_aerith_maintainer))
 
 # ========= ROUTES (kept in app.py) =========
 
@@ -1062,6 +1065,15 @@ async def _startup_event():
         _startup_tasks.append(start_bg_monitor())
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
+    # Aerith self-maintenance (off unless AERITH_MAINTENANCE_ENABLED=1):
+    # watches logs, drafts fixes in git worktrees, offers features from research.
+    try:
+        from companion.maintenance.runtime import build_maintainer
+        _aerith_maintainer = build_maintainer()
+        if _aerith_maintainer is not None:
+            _startup_tasks.append(_aerith_maintainer.start())
+    except Exception as _e:
+        logger.warning("Failed to start Aerith maintenance: %s", _e)
     # MCP servers can be slow or blocked by local tooling. Connect them after
     # the web server is accepting traffic instead of delaying the whole UI.
     async def _startup_mcp_connections():
