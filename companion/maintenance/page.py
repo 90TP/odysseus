@@ -29,12 +29,28 @@ PAGE = """<!doctype html>
       font-size:12px;max-height:360px;overflow:auto}
   .empty{color:var(--dim);font-style:italic}
   #msg{min-height:1.4em;margin-bottom:10px}
+  .chat{max-height:420px;overflow:auto;margin-bottom:8px}
+  .bubble{padding:8px 10px;border-radius:8px;margin:6px 0;white-space:pre-wrap;max-width:92%}
+  .bubble.cid{background:#00000040;border:1px solid #ffffff25}
+  .bubble.user{background:#e8ecff;color:#0b1a5c;margin-left:auto}
+  .who{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin-bottom:2px}
+  .bubble.user .who{color:#3b4a8a}
+  .changes{font-size:12px;color:var(--ok);margin-top:4px}
+  .send{display:flex;gap:8px}
+  .send textarea{flex:1;font:inherit;padding:8px;border-radius:6px;border:1px solid var(--edge);
+                 background:#00000055;color:var(--text);min-height:44px;resize:vertical}
+  .send button{margin:0;align-self:flex-end}
+  .badge{background:var(--warn);color:#1b1300;border-radius:9px;padding:0 7px;font-size:12px;margin-left:6px}
 </style></head>
 <body>
 <h1>Aerith &middot; Updates</h1>
 <div id="msg" class="meta"></div>
 <div class="win"><h2>Ready for your review</h2><div id="ready"></div></div>
-<div class="win"><h2>Feature ideas from research</h2><div id="ideas"></div></div>
+<div class="win"><h2>Planning with Cid<span id="cidBadge"></span></h2>
+  <div id="cidChat" class="chat"></div>
+  <form id="cidForm" class="send"><textarea id="cidInput" placeholder="Talk it through with Cid. e.g. “Do 1 and 3, skip 2”"></textarea>
+  <button class="primary" type="submit">Send</button></form></div>
+<div class="win"><h2>Options on the table</h2><div id="ideas"></div></div>
 <div class="win"><h2>Aerith is working on</h2><div id="working"></div></div>
 <div class="win"><h2>Errors Aerith has seen</h2><div id="errors"></div></div>
 <script nonce="__NONCE__">
@@ -83,15 +99,50 @@ function renderWorking(list){
   const box=$("working"); if(!list.length) return empty(box,"Idle.");
   box.replaceChildren(...list.map(p=>{
     const it=el("div","item");
-    const state = p.status==="failed" ? "Couldn’t finish: "+(p.error||"") : p.status;
+    const n = p.attempt||1;
+    let state = p.status==="failed" ? "Gave up for now: "+(p.error||"") : p.status;
+    if(p.status!=="failed" && n>1) state += " · attempt "+n+": investigating why the usual fix didn’t work";
+    if(p.status!=="failed" && p.agreed_with) state += " · agreed with Cid";
     it.append(el("div","title",p.title), tags(p), el("div","meta "+(p.status==="failed"?"bad":"warn"),state));
+    if(p.status==="failed" && n>1) it.appendChild(el("div","meta","Tried "+n+" different approaches."));
     if(p.test_output && p.status==="failed") it.appendChild(el("pre",null,p.test_output));
     if(p.status==="failed"){
-      if(p.kind==="feature") it.appendChild(button("Try again",null, async()=>{await call("/proposals/"+p.id+"/choose",{method:"POST"});}));
+      it.appendChild(button("Try another way","primary", async()=>{
+        if(p.kind==="feature") await call("/proposals/"+p.id+"/choose",{method:"POST"});
+        else await call("/incidents/"+p.incident_id+"/fix",{method:"POST"});
+        say("Aerith is digging into why it failed.","ok");}));
       it.appendChild(button("Discard",null, async()=>{await call("/proposals/"+p.id+"/reject",{method:"POST",body:"{}"});}));
     }
     return it;}));
 }
+let lastCid = "";
+function renderCid(conv){
+  const box=$("cidChat");
+  $("cidBadge").replaceChildren(...(conv.unread ? [el("span","badge",conv.unread+" new")] : []));
+  const sig = conv.messages.map(m=>m.id).join(",");
+  if(sig===lastCid) return; lastCid = sig;
+  if(!conv.messages.length){ empty(box,"Cid will message you when research turns up something worth building."); return; }
+  box.replaceChildren(...conv.messages.map(m=>{
+    const b=el("div","bubble "+(m.role==="cid"?"cid":"user"));
+    b.append(el("div","who",m.role==="cid"?"Cid":"You"), document.createTextNode(m.content));
+    const c=m.changes||{}; const bits=[];
+    if((c.agreed||[]).length) bits.push("Agreed: "+c.agreed.length+" sent to Aerith to build");
+    if((c.added||[]).length) bits.push("Added "+c.added.length);
+    if((c.revised||[]).length) bits.push("Reworded "+c.revised.length);
+    if((c.dropped||[]).length) bits.push("Dropped "+c.dropped.length);
+    if(bits.length) b.appendChild(el("div","changes",bits.join(" · ")));
+    return b;}));
+  box.scrollTop = box.scrollHeight;
+  if(conv.unread) call("/cid/read",{method:"POST"}).catch(()=>{});
+}
+$("cidForm").onsubmit = async (ev)=>{
+  ev.preventDefault();
+  const input=$("cidInput"), text=input.value.trim(); if(!text) return;
+  const btn=ev.target.querySelector("button"); btn.disabled=true; input.disabled=true;
+  try{ await call("/cid",{method:"POST",body:JSON.stringify({message:text})}); input.value=""; }
+  catch(e){ say(e.message,"bad"); }
+  btn.disabled=false; input.disabled=false; load();
+};
 function renderErrors(list){
   const box=$("errors"); if(!list.length) return empty(box,"No errors seen. Lovely.");
   box.replaceChildren(...list.slice(0,30).map(i=>{
@@ -110,7 +161,8 @@ async function load(){
     const s = await call("/status");
     if(!s.enabled){ say("Aerith maintenance is off. Set AERITH_MAINTENANCE_ENABLED=1 and restart.","warn"); return; }
     if(!s.owner_configured) say("Set AERITH_MAINTENANCE_OWNER so Aerith knows which account to work as.","warn");
-    const [{proposals}, {incidents}] = await Promise.all([call("/proposals"), call("/incidents")]);
+    const [{proposals}, {incidents}, conv] = await Promise.all([call("/proposals"), call("/incidents"), call("/cid")]);
+    renderCid(conv);
     renderReady(proposals.filter(p=>p.status==="ready"));
     renderIdeas(proposals.filter(p=>p.kind==="feature" && p.status==="offered"));
     renderWorking(proposals.filter(p=>["queued","building","failed"].includes(p.status)));

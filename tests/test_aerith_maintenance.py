@@ -248,3 +248,196 @@ def test_human_admin_gate_refuses_tokens_and_aerith():
         require_human_admin(_req(current_user=INTERNAL_TOOL_USER))
     with pytest.raises(HTTPException):
         require_human_admin(_req(headers={INTERNAL_TOOL_HEADER: "x"}))
+
+
+# -- when the usual fix doesn't work -----------------------------------------
+
+from companion.maintenance.builder import SetupError, failing_tests  # noqa: E402
+from companion.maintenance.cid import CidPlanner, split_reply  # noqa: E402
+
+
+def test_failing_tests_parses_pytest_summary():
+    out = "....\nFAILED tests/a.py::test_x - assert 1\nERROR tests/b.py - ImportError\n1 failed"
+    assert failing_tests(out) == {"tests/a.py::test_x", "tests/b.py"}
+
+
+FAIL_SAME = "sh -c 'echo FAILED tests/old.py::test_broken; exit 1'"
+
+
+def test_failures_already_on_base_dont_block_a_fix(tmp_path, repo):
+    b, s = _builder(tmp_path, repo, _writes("app.py", "x = 6\n"), test_cmd=FAIL_SAME)
+    prop = s.add_proposal("bugfix", "Fix", "x")
+    done = asyncio.run(b.build(prop["id"]))
+    assert done["status"] == st.READY and "already failing" in done["test_output"]
+
+
+def test_new_failures_still_block(tmp_path, repo):
+    # Fails only when app.py has been changed (i.e. not on the base commit).
+    cmd = "sh -c 'grep -q \"x = 1\" app.py || { echo FAILED tests/new.py::test_new; exit 1; }'"
+    b, s = _builder(tmp_path, repo, _writes("app.py", "x = 7\n"), test_cmd=cmd)
+    prop = s.add_proposal("bugfix", "Fix", "x")
+    done = asyncio.run(b.build(prop["id"]))
+    assert done["status"] == st.FAILED and done["failure_kind"] == "tests"
+    assert "tests/new.py::test_new" in done["test_output"]
+
+
+def _maintainer_with_repo(tmp_path, repo, agent, **cfg):
+    config = MaintenanceConfig(enabled=True, repo_dir=str(repo), data_dir=str(tmp_path / "data"),
+                               test_cmd="true", **cfg)
+    return AerithMaintainer(config, agent=agent, llm=lambda p: "[]")
+
+
+async def _drain(m):
+    while m._jobs:
+        await asyncio.gather(*list(m._jobs))
+
+
+def test_failed_fix_is_investigated_and_retried_another_way(tmp_path, repo):
+    prompts = []
+
+    async def agent(prompt, workspace):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return "I couldn't see the problem"          # attempt 1: no change
+        with open(os.path.join(workspace, "app.py"), "w") as fh:
+            fh.write("x = 8  # guarded\n")
+        return "Why the usual fix didn't work: wrong file. Added a guard."
+
+    m = _maintainer_with_repo(tmp_path, repo, agent)
+
+    async def run():
+        m.ingest([_event("Crash in handler")])
+        await _drain(m)
+    asyncio.run(run())
+
+    assert len(prompts) == 2
+    assert "THIS IS ATTEMPT" not in prompts[0]
+    assert "THIS IS ATTEMPT 2" in prompts[1] and "No change was made" in prompts[1]
+    props = m.store.proposals(kind="bugfix")
+    by_status = {p["status"]: p for p in props}
+    assert set(by_status) == {st.SUPERSEDED, st.READY}
+    assert by_status[st.READY]["attempt"] == 2
+    assert m.store.incidents()[0]["status"] == st.PROPOSED
+
+
+def test_retries_stop_at_max_attempts_and_button_starts_new_round(tmp_path, repo):
+    calls = []
+
+    async def stuck(prompt, workspace):
+        calls.append(prompt)
+        return "no idea"
+
+    m = _maintainer_with_repo(tmp_path, repo, stuck, max_attempts=2)
+
+    async def run():
+        m.ingest([_event("Stubborn")])
+        await _drain(m)
+    asyncio.run(run())
+    assert len(calls) == 2
+    inc = m.store.incidents()[0]
+    assert inc["status"] == st.FIX_FAILED
+
+    async def press_button():
+        m.queue_fix(inc["id"], force=True)
+        await _drain(m)
+    asyncio.run(press_button())
+    assert len(calls) == 4                                   # a fresh round of 2
+    assert "THIS IS ATTEMPT 3" in calls[2]                   # still knows the history
+
+
+def test_setup_errors_are_not_retried(tmp_path, repo):
+    calls = []
+
+    async def no_model(prompt, workspace):
+        calls.append(1)
+        raise SetupError("Set AERITH_MAINTENANCE_OWNER")
+
+    m = _maintainer_with_repo(tmp_path, repo, no_model)
+
+    async def run():
+        m.ingest([_event("x")])
+        await _drain(m)
+    asyncio.run(run())
+    assert calls == [1]
+    assert m.store.proposals()[0]["failure_kind"] == "setup"
+
+
+# -- Cid ------------------------------------------------------------------------
+
+def test_split_reply_separates_actions():
+    text, actions = split_reply('Do it.\n<actions>{"agree": ["a1"]}</actions>')
+    assert text == "Do it." and actions == {"agree": ["a1"]}
+    assert split_reply("just words") == ("just words", {})
+    assert split_reply("x <actions>not json</actions>")[1] == {}
+
+
+def _cid(tmp_path, llm, notes=None):
+    s = st.MaintenanceStore(str(tmp_path / "cid"))
+    chosen = []
+
+    def choose(pid, user):
+        chosen.append((pid, user))
+        return s.update_proposal(pid, status=st.QUEUED)
+
+    async def notify(title, body):
+        if notes is not None:
+            notes.append((title, body))
+    return CidPlanner(s, llm, notify=notify, choose=choose), s, chosen
+
+
+def test_cid_messages_the_user_when_options_arrive(tmp_path):
+    notes = []
+    cid, s, _ = _cid(tmp_path, lambda p: "Oi. Two ideas. 1 is good, 2 is a time sink. Which?", notes)
+    a = s.add_proposal("feature", "Sleep chart", "chart", research_query="sleep")
+    b = s.add_proposal("feature", "Ring sync", "sync")
+    asyncio.run(cid.announce([a, b]))
+    assert len(notes) == 1 and "2 feature ideas" in notes[0][0]
+    assert "updates page" in notes[0][1]
+    msgs = s.cid_messages()
+    assert msgs[0]["role"] == "cid" and msgs[0]["option_ids"] == [a["id"], b["id"]]
+    assert s.cid_unread() == 1
+
+
+def test_cid_only_builds_what_was_agreed_and_edits_the_rest(tmp_path):
+    s_holder = {}
+
+    def llm(prompt):
+        a, b, c = s_holder["ids"]
+        return ("Right, building the chart, binning sync, renaming the third.\n"
+                "<actions>" + json.dumps({
+                    "agree": [a, "not-a-real-id"],
+                    "drop": [b],
+                    "revise": [{"id": c, "title": "Battery widget", "platforms": ["android"]}],
+                    "add": [{"title": "Dark mode", "summary": "for the page", "platforms": ["desktop"]}],
+                }) + "</actions>")
+
+    cid, s, chosen = _cid(tmp_path, llm)
+    ids = [s.add_proposal("feature", t, t)["id"] for t in ("Sleep chart", "Ring sync", "Battery")]
+    s_holder["ids"] = ids
+    out = cid.reply("Do the chart, skip sync, and the battery one should be android only", "tom")
+
+    assert chosen == [(ids[0], "tom")]
+    assert out["changes"]["agreed"] == [ids[0]]
+    assert s.proposal(ids[1])["status"] == st.REJECTED
+    assert s.proposal(ids[2])["title"] == "Battery widget"
+    assert s.proposal(ids[2])["platforms"] == ["android"]
+    added = s.proposal(out["changes"]["added"][0])
+    assert added["title"] == "Dark mode" and added["status"] == st.OFFERED
+    assert [m["role"] for m in s.cid_messages()] == ["user", "cid"]
+    assert "<actions>" not in s.cid_messages()[-1]["content"]
+
+
+def test_cid_cannot_agree_options_that_are_not_on_the_table(tmp_path):
+    cid, s, chosen = _cid(tmp_path, lambda p: '<actions>{"agree": ["x"]}</actions>')
+    done = s.add_proposal("feature", "Old", "o", status=st.APPLIED)
+    cid.apply_actions({"agree": [done["id"]]}, "tom")
+    assert chosen == []
+
+
+def test_cid_falls_back_when_the_model_returns_data_and_replies_are_read(tmp_path):
+    cid, s, _ = _cid(tmp_path, lambda p: '[{"title": "x"}]')
+    a = s.add_proposal("feature", "Sleep chart", "chart")
+    asyncio.run(cid.announce([a]))
+    assert s.cid_messages()[0]["content"].startswith("Right, research turned up")
+    cid.reply("tell me more", "tom")
+    assert s.cid_unread() == 0

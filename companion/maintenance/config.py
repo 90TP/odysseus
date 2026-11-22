@@ -42,11 +42,14 @@ class MaintenanceConfig:
     repo_dir: str = field(default_factory=_repo_default)
     data_dir: str = field(default_factory=_data_default)
     log_file: str = ""
-    test_cmd: str = "python -m pytest -q -x tests"
+    test_cmd: str = "python -m pytest -q tests"
     poll_seconds: int = 30
     max_fixes_per_day: int = 3
     # An incident must occur at least this many times before a fix is drafted.
     min_occurrences: int = 1
+    # Attempts per round: after a failed fix Aerith investigates why and tries
+    # a different approach or a workaround, up to this many times in total.
+    max_attempts: int = 3
     agent_timeout_seconds: int = 900
     test_timeout_seconds: int = 900
 
@@ -60,6 +63,7 @@ class MaintenanceConfig:
             poll_seconds=max(5, _int("AERITH_MAINTENANCE_POLL_SECONDS", cls.poll_seconds)),
             max_fixes_per_day=max(0, _int("AERITH_MAX_FIXES_PER_DAY", cls.max_fixes_per_day)),
             min_occurrences=max(1, _int("AERITH_FIX_MIN_OCCURRENCES", cls.min_occurrences)),
+            max_attempts=max(1, _int("AERITH_FIX_MAX_ATTEMPTS", cls.max_attempts)),
             agent_timeout_seconds=max(60, _int("AERITH_AGENT_TIMEOUT", cls.agent_timeout_seconds)),
             test_timeout_seconds=max(30, _int("AERITH_TEST_TIMEOUT", cls.test_timeout_seconds)),
         )

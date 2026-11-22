@@ -8,7 +8,8 @@ an admin approves it.
 app.log ─┐                               ┌─> ready ──(you approve)──> merged, restart
 android ─┼─> incidents ──(autofix)──> build in worktree ─┤
 desktop ─┘                               └─> failed (kept for inspection)
-research reports ──> feature options ──(you choose)──> build ──> ready ──> …
+failed ──> investigate why, try another way / work around it (up to 3 attempts)
+research reports ──> feature options ──> Cid messages you ──(you agree)──> build ──> ready ──> …
 ```
 
 ## Turning it on
@@ -34,7 +35,20 @@ desktop browser and in the Android WebView. All settings are in
 3. Aerith's work is committed. The proposal is **ready** only if the diff is
    non-empty and `AERITH_TEST_CMD` passes. Tests run with their own data dir,
    so their logs can't create new incidents.
-4. When you approve, the branch is merged (`--no-ff`) into the live checkout.
+4. **If an attempt fails** (tests fail, no change, timeout, or it touched a
+   protected file), Aerith tries again automatically. The new attempt is told
+   what each earlier attempt changed, said, and why it failed. It must first
+   work out *why* the usual fix isn't working: wrong cause, broke something
+   else, cause outside the codebase, or a test that was already broken. Then
+   it takes a different approach, or works around the problem at our boundary
+   (guard, fallback, retry, graceful degradation). Up to
+   `AERITH_FIX_MAX_ATTEMPTS` (3) per round. Pressing "Try another way" /
+   "Ask Aerith to fix" starts a new round that still has the full history.
+   Setup problems (no owner, no model) aren't retried.
+5. **Tests that were already failing don't block a fix.** If tests fail,
+   Aerith runs the suite once on the base commit (cached per commit). The
+   change only fails if it causes *new* failures.
+6. When you approve, the branch is merged (`--no-ff`) into the live checkout.
    Restart Odysseus to load it. If the same error comes back, the incident
    reopens.
 
@@ -71,12 +85,23 @@ Only ERROR/CRITICAL/FATAL/CRASH events are kept. Android `at pkg.Class.fn(File.k
 frames are fingerprinted the same way as Python tracebacks. Fixes for
 Android land under `android/`.
 
-## Features from research
+## Features from research, planned with Cid
 
 When a deep-research report finishes, Aerith asks the model for up to four
 features the report supports, each tagged android/desktop/server. Only
-reports finished after maintenance was switched on are read. Choosing one
-builds it the same way as a fix. You can also ask directly:
+reports finished after maintenance was switched on are read.
+
+**Cid** then messages you through your normal reminder channel (Settings →
+reminders: browser, email, ntfy or webhook). He gives his take on each option
+and asks what you want. You talk it through in **Planning with Cid** on the
+updates page. He can reword, split, merge, add or drop options as you agree
+them. An option goes to Aerith to build only when you've said yes to it in
+the chat. The result still waits in "Ready for your review" for approval.
+Chatting with Cid needs an admin browser session, so tokens and Aerith
+can't talk him into building things.
+
+The "Build this" / "Not now" buttons are still there as shortcuts. You can
+also ask for options from a specific report:
 `POST …/features/from-research {"research_id": "…"}`.
 
 ## API
@@ -88,3 +113,5 @@ builds it the same way as a fix. You can also ask directly:
 | POST | `/incidents/{id}/fix`, `/incidents/{id}/dismiss` | admin browser session |
 | POST | `/proposals/{id}/choose`, `/approve`, `/reject` | admin browser session |
 | POST | `/features/from-research` | admin browser session |
+| GET | `/cid` (messages + options), POST `/cid/read` | admin |
+| POST | `/cid` `{"message": "…"}` (talk to Cid; agreed options get built) | admin browser session |

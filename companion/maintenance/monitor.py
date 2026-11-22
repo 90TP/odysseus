@@ -8,7 +8,8 @@ from typing import Callable
 
 from companion.maintenance import features
 from companion.maintenance import store as st
-from companion.maintenance.builder import AgentRunner, ProposalBuilder
+from companion.maintenance.builder import RETRYABLE, AgentRunner, ProposalBuilder, describe_attempt
+from companion.maintenance.cid import CidPlanner, Notifier
 from companion.maintenance.config import MaintenanceConfig
 from companion.maintenance.log_watch import ErrorEvent, LogTailer, parse_log_text
 
@@ -17,12 +18,14 @@ logger = logging.getLogger(__name__)
 
 class AerithMaintainer:
     def __init__(self, config: MaintenanceConfig, agent: AgentRunner,
-                 llm: Callable[[str], str], research_dir: str = ""):
+                 llm: Callable[[str], str], research_dir: str = "",
+                 notify: Notifier | None = None):
         self.config = config
         self.store = st.MaintenanceStore(config.data_dir)
         self.builder = ProposalBuilder(config, self.store, agent)
         self.llm = llm
         self.research_dir = research_dir
+        self.cid = CidPlanner(self.store, llm, notify=notify, choose=self.choose_feature)
         self._task: asyncio.Task | None = None
         self._jobs: set[asyncio.Task] = set()
 
@@ -61,23 +64,63 @@ class AerithMaintainer:
             if self.store.fixes_in_last_day() >= self.config.max_fixes_per_day:
                 logger.info("Aerith fix budget used up for today; %s waits", incident_id)
                 return None
-        self.store.note_fix_attempt()
+        last = self.store.proposal(incident.get("proposal_id") or "")
+        if last and last.get("status") == st.FAILED:
+            # Pressing "fix" again after failures: start a new round that still
+            # knows everything the earlier attempts tried.
+            return self.retry(last["id"], new_round=True)
+        if not force:
+            self.store.note_fix_attempt()
         first_line = incident["message"].splitlines()[0] if incident["message"] else incident_id
         proposal = self.store.add_proposal(
             "bugfix", f"Fix {incident['platform']} error: {first_line[:80]}",
             incident["message"], status=st.QUEUED, platforms=[incident["platform"]],
-            incident_id=incident_id,
+            incident_id=incident_id, attempt=1, round_attempt=1, previous_attempts=[],
         )
         self.store.update_incident(incident_id, status=st.FIXING, proposal_id=proposal["id"])
         self._spawn(proposal["id"])
         return proposal
 
-    def choose_feature(self, proposal_id: str) -> dict | None:
-        """The user picked an offered feature: build it."""
-        prop = self.store.proposal(proposal_id)
-        if not prop or prop["kind"] != "feature" or prop["status"] not in (st.OFFERED, st.FAILED):
+    def retry(self, proposal_id: str, *, new_round: bool = False) -> dict | None:
+        """Follow a failed attempt with one that investigates why it failed.
+
+        The new proposal carries a short account of every earlier attempt, so
+        Aerith can work out why the usual fix isn't working and go another way.
+        """
+        old = self.store.proposal(proposal_id)
+        if not old or old.get("status") != st.FAILED:
             return None
-        prop = self.store.update_proposal(proposal_id, status=st.QUEUED)
+        history = list(old.get("previous_attempts") or []) + [describe_attempt(old)]
+        keep = ("kind", "title", "summary", "platforms", "incident_id", "rationale", "effort",
+                "research_id", "research_query", "agreed_with")
+        fields = {k: old[k] for k in keep if k in old}
+        kind, title, summary = fields.pop("kind"), fields.pop("title"), fields.pop("summary")
+        new = self.store.add_proposal(
+            kind, title, summary, status=st.QUEUED,
+            attempt=int(old.get("attempt") or 1) + 1,
+            round_attempt=1 if new_round else int(old.get("round_attempt") or 1) + 1,
+            previous_attempts=history[-4:], retry_of=old["id"], **fields,
+        )
+        # The failed attempt's diff is in the history now; free its worktree.
+        self.builder._discard_worktree(old.get("worktree"), branch=old.get("branch"))
+        self.store.update_proposal(old["id"], status=st.SUPERSEDED, superseded_by=new["id"])
+        if new.get("incident_id"):
+            self.store.update_incident(new["incident_id"], status=st.FIXING, proposal_id=new["id"])
+        logger.info("Aerith is retrying %s as %s (attempt %s)", old["id"], new["id"], new["attempt"])
+        self._spawn(new["id"])
+        return new
+
+    def choose_feature(self, proposal_id: str, agreed_with: str = "") -> dict | None:
+        """The user picked an offered feature (directly or with Cid): build it."""
+        prop = self.store.proposal(proposal_id)
+        if not prop or prop["kind"] != "feature":
+            return None
+        if prop["status"] == st.FAILED:
+            return self.retry(proposal_id, new_round=True)
+        if prop["status"] != st.OFFERED:
+            return None
+        prop = self.store.update_proposal(proposal_id, status=st.QUEUED, attempt=1, round_attempt=1,
+                                          previous_attempts=[], agreed_with=agreed_with or None)
         self._spawn(proposal_id)
         return prop
 
@@ -92,10 +135,20 @@ class AerithMaintainer:
 
     async def _build(self, proposal_id: str) -> None:
         try:
-            await self.builder.build(proposal_id)
+            result = await self.builder.build(proposal_id)
         except Exception as exc:
             logger.exception("Aerith build crashed for %s", proposal_id)
-            self.store.update_proposal(proposal_id, status=st.FAILED, error=str(exc))
+            result = self.store.update_proposal(proposal_id, status=st.FAILED, error=str(exc),
+                                                failure_kind="agent")
+        if self.should_retry(result):
+            self.retry(proposal_id)
+
+    def should_retry(self, result: dict | None) -> bool:
+        return bool(
+            result and result.get("status") == st.FAILED
+            and result.get("failure_kind") in RETRYABLE
+            and int(result.get("round_attempt") or 1) < self.config.max_attempts
+        )
 
     # -- research ----------------------------------------------------------
     def scan_research(self) -> list[dict]:
@@ -125,7 +178,10 @@ class AerithMaintainer:
     # -- loop --------------------------------------------------------------
     async def tick(self) -> None:
         await asyncio.to_thread(self.scan_logs)
-        await asyncio.to_thread(self.scan_research)
+        offered = await asyncio.to_thread(self.scan_research)
+        if offered:
+            # Cid messages the user so they can agree together what to build.
+            await self.cid.announce(offered)
 
     async def run_forever(self) -> None:
         logger.info("Aerith maintenance watching %s", self.config.log_file or "(no log file)")

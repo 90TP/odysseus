@@ -76,8 +76,62 @@ Do NOT push, do NOT edit {protected}, do NOT touch secrets or .env files.
 End with a short summary of what you built and anything left to do."""
 
 
+RETRY_SECTION = """
+
+THIS IS ATTEMPT {attempt}. The usual fix has already failed {failed} time(s):
+{history}
+
+Before changing anything, investigate WHY the earlier attempt(s) failed:
+- Reproduce the problem (run the failing test or code path) and read the real output.
+- Decide which of these it was: wrong root cause; correct cause but the fix broke
+  something else; the cause is outside this codebase (a dependency, the OS/device,
+  an external service, config or bad data); a test that was already broken; or the
+  real fix needs a protected file.
+- If the earlier change was close, build on it. If it was the wrong approach, drop it.
+
+Then fix it a DIFFERENT way. If the root cause can't be fixed directly here, work
+around it at our boundary: validate or guard the input, add a fallback or retry,
+degrade gracefully with a clear log message, or put the risky path behind a check.
+Never repeat a change that already failed.
+
+Start your final summary with "Why the usual fix didn't work:" and one or two
+sentences, then describe the workaround."""
+
+MAX_HISTORY_CHARS = 2500
+
+
 class BuildError(RuntimeError):
     pass
+
+
+class SetupError(RuntimeError):
+    """Aerith can't work at all (no model, no owner). Retrying won't help."""
+
+
+# Failure kinds; only some are worth an investigative retry.
+SETUP, AGENT, NO_CHANGE, PROTECTED, TESTS = "setup", "agent", "no_change", "protected", "tests"
+RETRYABLE = {AGENT, NO_CHANGE, PROTECTED, TESTS}
+
+FAILED_TEST_RE = re.compile(r"^(?:FAILED|ERROR) (\S+)", re.M)
+
+
+def failing_tests(output: str) -> set[str]:
+    """Test ids pytest reports as failed/errored (from its short summary)."""
+    return set(FAILED_TEST_RE.findall(output or ""))
+
+
+def describe_attempt(prop: dict) -> str:
+    """Short account of a failed attempt, fed into the next attempt's prompt."""
+    lines = [f"- Attempt {prop.get('attempt', 1)} failed: {prop.get('error') or 'unknown error'}"]
+    if prop.get("files"):
+        lines.append(f"  Files it changed: {', '.join(prop['files'][:15])}")
+    if prop.get("report"):
+        lines.append(f"  What Aerith said: {prop['report'][-600:]}")
+    if prop.get("test_output") and not prop.get("tests_passed", True):
+        lines.append(f"  Test output (end):\n{prop['test_output'][-900:]}")
+    if prop.get("attempt_diff"):
+        lines.append(f"  Its diff (start):\n{prop['attempt_diff'][:900]}")
+    return "\n".join(lines)
 
 
 def _git(repo: str, *args: str, timeout: int = 120, check: bool = True) -> str:
@@ -106,6 +160,15 @@ class ProposalBuilder:
         return os.path.join(self.config.worktree_root, proposal_id)
 
     def _prompt(self, proposal: dict, branch: str) -> str:
+        prompt = self._base_prompt(proposal, branch)
+        previous = proposal.get("previous_attempts") or []
+        if previous:
+            history = "\n".join(previous)[-MAX_HISTORY_CHARS * 2:]
+            prompt += RETRY_SECTION.format(attempt=len(previous) + 1, failed=len(previous),
+                                           history=history)
+        return prompt
+
+    def _base_prompt(self, proposal: dict, branch: str) -> str:
         protected = ", ".join(PROTECTED_PATHS)
         if proposal["kind"] == "bugfix":
             inc = self.store.incident(proposal.get("incident_id") or "") or {}
@@ -127,6 +190,44 @@ class ProposalBuilder:
             rationale=proposal.get("rationale") or "(not given)",
             protected=protected,
         )
+
+    def _check_tests(self, cwd: str, base: str) -> tuple[bool, str]:
+        """Run tests; failures that already happen on the base commit don't
+        count against Aerith's change (a broken suite shouldn't block every fix)."""
+        ok, out = self._run_tests(cwd)
+        if ok:
+            return ok, out
+        now_failing = failing_tests(out)
+        if not now_failing:
+            return False, out
+        baseline = self._baseline_failures(base)
+        if baseline is None:
+            return False, out
+        new = now_failing - baseline
+        if new:
+            return False, out + "\n\nNew failures caused by this change: " + ", ".join(sorted(new))
+        return True, (out + f"\n\nAll {len(now_failing)} failing test(s) were already failing "
+                           f"before this change, so they don't block it.")
+
+    def _baseline_failures(self, base: str) -> set[str] | None:
+        cache = self.store.cursor("test_baseline")
+        if cache.get("commit") == base:
+            return set(cache.get("failing") or [])
+        path = os.path.join(self.config.worktree_root, f"baseline-{base[:10]}")
+        try:
+            if os.path.exists(path):
+                self._discard_worktree(path, branch=None)
+            _git(self.config.repo_dir, "worktree", "add", "--detach", path, base)
+            ok, out = self._run_tests(path)
+        except BuildError:
+            return None
+        finally:
+            self._discard_worktree(path, branch=None)
+        failing = set() if ok else failing_tests(out)
+        if not ok and not failing:
+            return None  # couldn't tell what failed
+        self.store.set_cursor("test_baseline", {"commit": base, "failing": sorted(failing)})
+        return failing
 
     def _run_tests(self, cwd: str) -> tuple[bool, str]:
         if not self.config.test_cmd:
@@ -175,8 +276,15 @@ class ProposalBuilder:
                 self.agent(self._prompt(proposal, branch), path),
                 timeout=self.config.agent_timeout_seconds,
             )
-        except Exception as exc:  # timeout or agent failure
-            return self._fail(proposal_id, proposal, f"Aerith could not finish: {exc!r}")
+        except SetupError as exc:
+            return self._fail(proposal_id, proposal, str(exc), kind=SETUP)
+        except asyncio.TimeoutError:
+            return self._fail(proposal_id, proposal,
+                              f"Aerith ran out of time ({self.config.agent_timeout_seconds}s).",
+                              kind=AGENT, **self._partial(path, base))
+        except Exception as exc:  # agent failure
+            return self._fail(proposal_id, proposal, f"Aerith could not finish: {exc!r}",
+                              kind=AGENT, **self._partial(path, base))
 
         # Commit anything the agent left uncommitted.
         if _git(path, "status", "--porcelain"):
@@ -185,14 +293,16 @@ class ProposalBuilder:
                  "commit", "-m", f"{prefix}: {proposal['title']}")
         changed = [f for f in _git(path, "diff", "--name-only", f"{base}..HEAD").splitlines() if f]
         if not changed:
-            return self._fail(proposal_id, proposal, "No change was made.", report=report)
+            return self._fail(proposal_id, proposal, "No change was made.", kind=NO_CHANGE,
+                              report=(report or "")[-4000:])
         blocked = [f for f in changed if f.startswith(PROTECTED_PATHS)]
         if blocked:
             return self._fail(proposal_id, proposal,
                               "Refused: the change touches protected files: " + ", ".join(blocked),
-                              report=report, files=changed)
+                              kind=PROTECTED, report=(report or "")[-4000:], files=changed,
+                              attempt_diff=_git(path, "diff", f"{base}..HEAD")[:6000])
 
-        ok, test_out = await asyncio.to_thread(self._run_tests, path)
+        ok, test_out = await asyncio.to_thread(self._check_tests, path, base)
         fields = dict(
             report=(report or "")[-4000:],
             files=changed,
@@ -201,15 +311,25 @@ class ProposalBuilder:
             test_output=test_out,
         )
         if not ok:
-            return self._fail(proposal_id, proposal, "Tests failed on Aerith's change.", **fields)
+            return self._fail(proposal_id, proposal, "Tests failed on Aerith's change.", kind=TESTS,
+                              attempt_diff=_git(path, "diff", f"{base}..HEAD")[:6000], **fields)
         self._set_incident(proposal, st.PROPOSED)
         logger.info("Aerith drafted %s on %s (%d files)", proposal_id, branch, len(changed))
         return self.store.update_proposal(proposal_id, status=st.READY, **fields)
 
-    def _fail(self, proposal_id: str, proposal: dict, error: str, **fields) -> dict:
-        logger.warning("Aerith proposal %s failed: %s", proposal_id, error)
+    def _partial(self, path: str, base: str) -> dict:
+        """What a timed-out/crashed attempt managed, so the next one can build on it."""
+        try:
+            diff = _git(path, "diff", base)  # includes uncommitted work
+        except BuildError:
+            return {}
+        return {"attempt_diff": diff[:6000]} if diff else {}
+
+    def _fail(self, proposal_id: str, proposal: dict, error: str, kind: str = AGENT, **fields) -> dict:
+        logger.warning("Aerith proposal %s failed (%s): %s", proposal_id, kind, error)
         self._set_incident(proposal, st.FIX_FAILED)
-        return self.store.update_proposal(proposal_id, status=st.FAILED, error=error, **fields)
+        return self.store.update_proposal(proposal_id, status=st.FAILED, error=error,
+                                          failure_kind=kind, **fields)
 
     def _set_incident(self, proposal: dict, status: str) -> None:
         if proposal.get("incident_id"):

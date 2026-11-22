@@ -43,6 +43,10 @@ class RejectBody(BaseModel):
     reason: str = Field("", max_length=500)
 
 
+class CidMessage(BaseModel):
+    message: str = Field(..., min_length=1, max_length=4000)
+
+
 class ResearchBody(BaseModel):
     research_id: str = Field("", max_length=200)
     query: str = Field("", max_length=2000)
@@ -106,6 +110,7 @@ def setup_maintenance_routes(get_maintainer) -> APIRouter:
             "open_incidents": len([i for i in m.store.incidents() if i["status"] in (st.OPEN, st.FIXING)]),
             "ready_for_review": len([p for p in props if p["status"] == st.READY]),
             "feature_options": len([p for p in props if p["kind"] == "feature" and p["status"] == st.OFFERED]),
+            "cid_unread": m.store.cid_unread(),
         }
 
     @router.post("/logs")
@@ -219,6 +224,30 @@ def setup_maintenance_routes(get_maintainer) -> APIRouter:
             offer_from_report, m.store, m.llm, query=query, report=report,
             research_id=body.research_id,
         )
+        await m.cid.announce(offered)
         return {"options": [_public(p) for p in offered]}
+
+    @router.get("/cid")
+    def cid_conversation(request: Request):
+        """Cid's planning conversation and the options on the table."""
+        _admin(request)
+        m = _m()
+        return {"messages": m.cid.messages(), "options": [_public(p) for p in m.cid.options()],
+                "unread": m.store.cid_unread()}
+
+    @router.post("/cid")
+    async def cid_reply(body: CidMessage, request: Request):
+        """Talk to Cid. Options you agree here go to Aerith to build."""
+        import asyncio
+        who = require_human_admin(request)
+        m = _m()
+        result = await asyncio.to_thread(m.cid.reply, body.message, who)
+        return {**result, "options": [_public(p) for p in m.cid.options()]}
+
+    @router.post("/cid/read")
+    def cid_read(request: Request):
+        _admin(request)
+        _m().store.mark_cid_read()
+        return {"ok": True}
 
     return router

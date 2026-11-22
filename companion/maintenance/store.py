@@ -18,8 +18,8 @@ OPEN, FIXING, PROPOSED, RESOLVED, DISMISSED, FIX_FAILED = (
     "open", "fixing", "proposed", "resolved", "dismissed", "fix_failed",
 )
 # Proposal lifecycle
-OFFERED, QUEUED, BUILDING, READY, FAILED, APPLIED, REJECTED = (
-    "offered", "queued", "building", "ready", "failed", "applied", "rejected",
+OFFERED, QUEUED, BUILDING, READY, FAILED, APPLIED, REJECTED, SUPERSEDED = (
+    "offered", "queued", "building", "ready", "failed", "applied", "rejected", "superseded",
 )
 
 
@@ -55,10 +55,12 @@ class MaintenanceStore:
                 data.setdefault("proposals", {})
                 data.setdefault("cursor", {})
                 data.setdefault("fix_log", [])
+                data.setdefault("cid", {"messages": [], "unread": 0})
                 return data
         except (OSError, ValueError):
             pass
-        return {"incidents": {}, "proposals": {}, "cursor": {}, "fix_log": []}
+        return {"incidents": {}, "proposals": {}, "cursor": {}, "fix_log": [],
+                "cid": {"messages": [], "unread": 0}}
 
     def _save(self, data: dict) -> None:
         _atomic_write(self.path, data)
@@ -178,6 +180,34 @@ class MaintenanceStore:
             prop["updated_at"] = time.time()
             self._save(data)
             return dict(prop)
+
+    # -- Cid's planning conversation -------------------------------------
+    MAX_CID_MESSAGES = 200
+
+    def add_cid_message(self, role: str, content: str, **fields) -> dict:
+        msg = {"id": uuid.uuid4().hex[:10], "role": role, "content": content[:6000],
+               "at": time.time(), **fields}
+        with self._lock:
+            data = self._load()
+            cid = data["cid"]
+            cid["messages"] = (cid.get("messages") or [])[-(self.MAX_CID_MESSAGES - 1):] + [msg]
+            cid["unread"] = int(cid.get("unread") or 0) + 1 if role == "cid" else 0
+            self._save(data)
+        return dict(msg)
+
+    def cid_messages(self) -> list[dict]:
+        with self._lock:
+            return list(self._load()["cid"].get("messages") or [])
+
+    def cid_unread(self) -> int:
+        with self._lock:
+            return int(self._load()["cid"].get("unread") or 0)
+
+    def mark_cid_read(self) -> None:
+        with self._lock:
+            data = self._load()
+            data["cid"]["unread"] = 0
+            self._save(data)
 
     # -- rate limiting -----------------------------------------------------
     def fixes_in_last_day(self) -> int:

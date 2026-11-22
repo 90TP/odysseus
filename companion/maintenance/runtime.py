@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from companion.maintenance.builder import SetupError
 from companion.maintenance.config import MaintenanceConfig
 from companion.maintenance.monitor import AerithMaintainer
 
@@ -24,9 +25,12 @@ def build_maintainer(config: MaintenanceConfig | None = None) -> AerithMaintaine
 
     def _route():
         if not config.owner:
-            raise RuntimeError("Set AERITH_MAINTENANCE_OWNER to the Odysseus user Aerith works as")
+            raise SetupError("Set AERITH_MAINTENANCE_OWNER to the Odysseus user Aerith works as")
         from companion.routes import _resolve_aerith_route
-        return _resolve_aerith_route(config.owner)
+        try:
+            return _resolve_aerith_route(config.owner)
+        except RuntimeError as exc:  # no endpoint / model configured
+            raise SetupError(str(exc)) from exc
 
     async def agent(prompt: str, workspace: str) -> str:
         from companion.aerith_agent import run_aerith_agent
@@ -47,5 +51,14 @@ def build_maintainer(config: MaintenanceConfig | None = None) -> AerithMaintaine
         from src.constants import DEEP_RESEARCH_DIR
     except Exception:  # pragma: no cover
         DEEP_RESEARCH_DIR = ""
-    _maintainer = AerithMaintainer(config, agent=agent, llm=llm, research_dir=DEEP_RESEARCH_DIR)
+    async def notify(title: str, body: str) -> None:
+        """Message the user through their reminder channel (browser/email/ntfy/webhook)."""
+        import uuid
+        from routes.note.note_routes import dispatch_reminder
+        # Synthesis off: the reminder persona must not rewrite Cid's words.
+        await dispatch_reminder(title, body, f"cid-{uuid.uuid4().hex[:8]}", owner=config.owner,
+                                settings_override={"reminder_llm_synthesis": False})
+
+    _maintainer = AerithMaintainer(config, agent=agent, llm=llm, research_dir=DEEP_RESEARCH_DIR,
+                                   notify=notify)
     return _maintainer
