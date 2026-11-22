@@ -1,7 +1,20 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// Aerith error reporting. Set these in local.properties (never committed):
+//   aerith.url=https://your-odysseus-host:7000
+//   aerith.token=ody_...   (a paired-device token from Odysseus)
+// Leave them out and reporting is off.
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun buildConfigString(value: String?): String =
+    "\"" + (value ?: "").replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 android {
     namespace = "com.seventhhaven.meals"
@@ -13,6 +26,13 @@ android {
         targetSdk = 35
         versionCode = 2
         versionName = "0.2.0-webview"
+
+        buildConfigField("String", "AERITH_URL", buildConfigString(localProps.getProperty("aerith.url")))
+        buildConfigField("String", "AERITH_TOKEN", buildConfigString(localProps.getProperty("aerith.token")))
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {

@@ -2,14 +2,18 @@ package com.seventhhaven.meals
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import com.seventhhaven.meals.diagnostics.AerithReporter
 
 class MainActivity : ComponentActivity() {
 
@@ -18,6 +22,7 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AerithReporter.install(this)
 
         webView = WebView(this).apply web@ {
             settings.javaScriptEnabled = true
@@ -40,9 +45,51 @@ class MainActivity : ComponentActivity() {
                     view: WebView?,
                     request: WebResourceRequest?
                 ): Boolean = false
+
+                override fun onReceivedError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    error: WebResourceError?
+                ) {
+                    super.onReceivedError(view, request, error)
+                    if (request != null && request.isForMainFrame) {
+                        AerithReporter.report(
+                            message = "Page failed to load: ${error?.description} (code ${error?.errorCode})",
+                            detail = "url=${request.url}",
+                            source = "webview/load",
+                        )
+                    }
+                }
+
+                override fun onReceivedHttpError(
+                    view: WebView?,
+                    request: WebResourceRequest?,
+                    errorResponse: WebResourceResponse?
+                ) {
+                    super.onReceivedHttpError(view, request, errorResponse)
+                    val status = errorResponse?.statusCode ?: return
+                    if (request != null && request.isForMainFrame && status >= 500) {
+                        AerithReporter.report(
+                            message = "Server error $status loading page",
+                            detail = "url=${request.url}",
+                            source = "webview/http",
+                        )
+                    }
+                }
             }
 
-            webChromeClient = WebChromeClient()
+            webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(message: ConsoleMessage?): Boolean {
+                    if (message != null && message.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                        AerithReporter.report(
+                            message = "JS error: ${message.message()}",
+                            detail = "at ${message.sourceId()}:${message.lineNumber()}",
+                            source = "webview/console",
+                        )
+                    }
+                    return super.onConsoleMessage(message)
+                }
+            }
 
             if (savedInstanceState == null) {
                 loadUrl(HOME_URL)
