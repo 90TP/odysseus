@@ -887,6 +887,8 @@ app.include_router(setup_companion_routes())
 from companion.maintenance.routes import setup_maintenance_routes
 from companion.maintenance.runtime import get_maintainer as _get_aerith_maintainer
 app.include_router(setup_maintenance_routes(_get_aerith_maintainer))
+from companion.characters.routes import setup_character_routes
+app.include_router(setup_character_routes())
 
 # ========= ROUTES (kept in app.py) =========
 

@@ -44,7 +44,7 @@ def test_promote_requires_passed_audit(tmp_path):
 def test_promote_records_verification_and_owner_scoped_metadata(tmp_path):
     sm = SkillsManager(str(tmp_path))
     _add(sm, "candidate", owner="tom")
-    _add(sm, "candidate", owner="alice")
+    alice = _add(sm, "candidate", owner="alice")  # stored as candidate-2
     sm.set_audit("candidate", "pass", by_teacher=True, worker_model="worker", teacher_model="teacher", owner="tom")
     ev = _manager(tmp_path)
 
@@ -54,7 +54,13 @@ def test_promote_records_verification_and_owner_scoped_metadata(tmp_path):
     assert promoted["lineage"]["promoted_from_audit"]["by_teacher"] is True
     assert ev.metadata("candidate", owner="tom")["promoted_from_audit"]["verdict"] == "pass"
 
-    assert ev.metadata("candidate", owner="alice") == {}
+    assert ev.metadata(alice["name"], owner="alice") == {}
+    try:
+        ev.metadata("candidate", owner="alice")
+    except SkillEvolutionError:
+        pass
+    else:
+        raise AssertionError("alice could read tom's evolution metadata")
 
 
 def test_extend_preserves_previous_version_for_rollback(tmp_path):
@@ -80,13 +86,22 @@ def test_extend_preserves_previous_version_for_rollback(tmp_path):
 def test_rollback_is_owner_scoped(tmp_path):
     sm = SkillsManager(str(tmp_path))
     _add(sm, "candidate", owner="tom", procedure=["tom-one"])
-    _add(sm, "candidate", owner="alice", procedure=["alice-one"])
+    alice = _add(sm, "candidate", owner="alice", procedure=["alice-one"])  # candidate-2
     ev = _manager(tmp_path)
     ev.extend("candidate", owner="tom", procedure_append=["tom-two"])
 
+    # alice can't roll back tom's skill...
     try:
         ev.rollback("candidate", owner="alice", version="1.0.0")
+    except SkillEvolutionError:
+        pass
+    else:
+        raise AssertionError("cross-owner rollback succeeded")
+
+    # ...and tom's history doesn't leak into her own skill.
+    try:
+        ev.rollback(alice["name"], owner="alice", version="1.0.0")
     except SkillEvolutionError as exc:
         assert "history" in str(exc).lower()
     else:
-        raise AssertionError("cross-owner rollback succeeded")
+        raise AssertionError("rollback used another owner's history")

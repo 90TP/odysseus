@@ -102,3 +102,8 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Android local config (holds the Aerith token)
+android/**/local.properties
+android/**/build/
+android/**/.gradle/
