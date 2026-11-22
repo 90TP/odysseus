@@ -86,6 +86,8 @@ def test_retire_hides_without_deleting_and_promote_reactivates(tmp_path):
     assert retired["lineage"]["retired"] is True
     assert sm.load(owner="tom")[0]["name"] == "capability"
 
+    # Promotion is gated on a passing verification audit.
+    sm.set_audit("capability", "pass", owner="tom")
     promoted = ev.promote("capability", owner="tom", confidence=0.95)
     assert promoted["status"] == "published"
     assert promoted["confidence"] == 0.95
@@ -94,11 +96,16 @@ def test_retire_hides_without_deleting_and_promote_reactivates(tmp_path):
 
 def test_lineage_is_owner_scoped(tmp_path):
     sm = SkillsManager(str(tmp_path))
-    _add(sm, "shared", owner="tom")
-    _add(sm, "shared", owner="alice")
+    tom = _add(sm, "shared", owner="tom")
+    # Skill names are unique on disk across owners, so alice's copy is renamed.
+    alice = _add(sm, "shared", owner="alice")
+    assert alice["name"] != tom["name"]
     ev = _manager(tmp_path)
-    ev._set_record("shared", "tom", {"parents": ["tom-parent"]})
-    ev._set_record("shared", "alice", {"parents": ["alice-parent"]})
+    ev._set_record(tom["name"], "tom", {"parents": ["tom-parent"]})
+    ev._set_record(alice["name"], "alice", {"parents": ["alice-parent"]})
 
-    assert ev.lineage("shared", owner="tom")["parents"] == ["tom-parent"]
-    assert ev.lineage("shared", owner="alice")["parents"] == ["alice-parent"]
+    assert ev.lineage(tom["name"], owner="tom")["parents"] == ["tom-parent"]
+    assert ev.lineage(alice["name"], owner="alice")["parents"] == ["alice-parent"]
+    # alice can't read tom's skill lineage.
+    with __import__("pytest").raises(SkillEvolutionError):
+        ev.lineage(tom["name"], owner="alice")
