@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- dark rounded field -->
+    <path
+        android:fillColor="#17191D"
+        android:pathData="M18,4 L90,4 C98,4 104,10 104,18 L104,90 C104,98 98,104 90,104 L18,104 C10,104 4,98 4,90 L4,18 C4,10 10,4 18,4 Z" />
+
+    <!-- plate -->
+    <path
+        android:fillColor="#F4F1E8"
+        android:pathData="M54,28 C35,28 20,40.5 20,56 C20,71.5 35,84 54,84 C73,84 88,71.5 88,56 C88,40.5 73,28 54,28 Z M54,36 C68.5,36 80,44.7 80,56 C80,67.3 68.5,76 54,76 C39.5,76 28,67.3 28,56 C28,44.7 39.5,36 54,36 Z" />
+
+    <!-- stylised 7 -->
+    <path
+        android:fillColor="#F4C542"
+        android:pathData="M39,39 L72,39 L72,46 L59,46 C55,53 51,60 48,67 C46.5,70.5 45.3,74 44.5,78 L34,78 C35.2,72.8 37.1,67.7 39.6,62.6 C42.1,57.5 45.1,52 48.5,46 L39,46 Z" />
+
+    <!-- small meteor/steam accent -->
+    <path
+        android:fillColor="#7DD3FC"
+        android:pathData="M70,24 C76,26 81,30 84,35 C79,32 74,31 68,31 C65,31 62,31.5 59,32.5 C62.5,28 66,25.5 70,24 Z" />
+</vector>
